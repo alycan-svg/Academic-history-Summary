@@ -6,9 +6,36 @@ import time
 import re
 from datetime import datetime
 
+import os
+import platform
+
+def get_chrome_history_path():
+    """
+    动态获取 Chrome 历史记录路径，适配不同系统
+    """
+    if platform.system() == "Windows":
+        # Windows 的标准路径
+        base_path = os.path.expanduser(r"C:\Users\Administrator\AppData\Local\Google\Chrome\User Data\Profile 1\History")
+        
+        # 特别提醒：如果你在 Chrome 中登录了多个账号，文件夹可能不是 "Default"
+        # 而是 "Profile 1", "Profile 2" 等。如果 Default 不存在，可以手动去该目录下确认。
+        if not os.path.exists(base_path):
+            # 备选方案：尝试检查其他 Profile（此处仅为提示，通常 Default 即可）
+            pass 
+        return base_path
+    
+    elif platform.system() == "Darwin": # Mac 系统
+        return os.path.expanduser("~/Library/Application Support/Google/Chrome/Default/History")
+    
+    else: # Linux 系统
+        return os.path.expanduser("~/.config/google-chrome/Default/History")
+
+# 在你的配置区使用它
+HISTORY_PATH = get_chrome_history_path()
+
 # --- [配置区] ---
 # 1. 浏览器历史记录路径 (以 Edge 为例，Chrome 类似)
-HISTORY_PATH = os.path.expanduser(r"~\AppData\Local\Microsoft\Chrome\User Data\Default\History")
+#HISTORY_PATH = os.path.expanduser(r"~\AppData\Local\Microsoft\Chrome\User Data\Default\History")
 
 # 2. 采集白名单 (只采集感兴趣的网站，防止垃圾数据)
 WHITE_LIST = ["arxiv.org", "zhihu.com", "github.com", "bilibili.com", "csdn.net", "v.sjtu.edu.cn", "openai.com"]
