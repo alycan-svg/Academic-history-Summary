@@ -1,6 +1,6 @@
 
 # ====================================================================
-# 剪切板 & 浏览器历史记录工具 — 一个能存能查的小工具
+# 剪贴板数据库 — 一个能存能查的小工具
 #
 # 它能做什么？
 #   1. 把剪贴板内容和浏览器历史存进 SQLite 数据库
@@ -8,16 +8,29 @@
 #   3. 预留了 AI 接口，以后可以用自然语言提问来搜索
 # ====================================================================
 
+import json
+import re
 import sqlite3
 from datetime import datetime
+
+import requests  # 如果报错 No module named 'requests'，在终端运行: pip install requests
+
+# ============================================================
+# DeepSeek API 配置 — 在这里填入你的 API Key
+# 获取地址: https://platform.deepseek.com/api_keys
+# ============================================================
+
+DEEPSEEK_API_KEY = "sk-your-api-key-here"     # ← 把你的 API Key 填在这里
+DEEPSEEK_BASE_URL = "https://api.deepseek.com/v1/chat/completions"
+DEEPSEEK_MODEL = "deepseek-chat"
 
 # ============================================================
 # 第一部分：数据库和表的配置
 # 这里集中定义了所有"叫什么"、"有哪些可选值"，改一处全文件生效
 # ============================================================
 
-# 数据库文件名 — 存储剪切板和浏览器历史记录
-DB_PATH = "clipboard_history.db"
+# 数据库文件就放在当前目录下
+DB_PATH = "clipboard.db"
 
 # 表名 — 所有数据存在这一张表里
 TABLE_NAME = "clipboard_captures"
@@ -344,6 +357,59 @@ class QueryEngine:
 
 
 # ============================================================
+# DeepSeek API 核心调用函数
+# 所有需要跟 AI 对话的地方都通过这个函数，统一管理
+# ============================================================
+
+def _call_deepseek(system_prompt: str, user_message: str, api_key: str | None = None) -> str | None:
+    """
+    调用 DeepSeek API，返回 AI 的文本回复。
+
+    如果 API Key 还是默认值（没填），直接返回 None，表示 AI 未接入。
+    调用失败时也返回 None，上游代码会自动降级。
+
+    参数:
+        system_prompt: 告诉 AI 它是什么角色
+        user_message:  用户的问题或要给 AI 处理的内容
+        api_key:       不传就用全局 DEEPSEEK_API_KEY
+
+    返回:
+        AI 的文本回复，失败时返回 None
+    """
+    if api_key is None:
+        api_key = DEEPSEEK_API_KEY
+
+    # 检查 API Key 是否被用户填写过
+    if api_key.startswith("sk-your-api-key") or not api_key.strip():
+        print("  [提示] DeepSeek API Key 未设置，跳过 AI 调用")
+        return None
+
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+    payload = {
+        "model": DEEPSEEK_MODEL,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_message},
+        ],
+        "temperature": 0.3,
+        "max_tokens": 2000,
+    }
+
+    try:
+        resp = requests.post(DEEPSEEK_BASE_URL, headers=headers, json=payload, timeout=60)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
+    except requests.exceptions.RequestException as e:
+        print(f"  [DeepSeek API 调用失败] {e}")
+        return None
+
+
+# ============================================================
 # 第四部分：AIQueryProcessor — AI 大脑（预留接口）
 #
 # 未来接入 AI 后，用户就可以用大白话提问，比如：
@@ -361,23 +427,14 @@ class AIQueryProcessor:
     """
     AI 查询处理器 — 把"人话"翻译成"查询条件"。
 
-    AI 接入说明：
-      找一个 AI（比如 Claude API），把 SYSTEM_PROMPT（角色说明书）
-      和用户的问题一起发给它，让它按照指定的 JSON 格式输出查询参数。
-      然后拿着这个参数去调用 QueryEngine.search()，就完成了！
+    内部调用 DeepSeek API，把用户的自然语言问题（比如"上周复制的 Python 链接"）
+    转成 QueryEngine 能执行的结构化查询参数。
 
-    伪代码示例：
-        response = ai_client.chat(
-            system_prompt=SYSTEM_PROMPT,       # 告诉 AI 它是什么角色、怎么输出
-            user_message="上周复制的 Python 相关内容"
-        )
-        filters = json.loads(response)          # AI 返回的 JSON → Python 字典
-        engine.search(**filters)                # 丢给搜索引擎，拿到结果
+    如果 API Key 没填写，自动回退到空白查询（返回所有记录）。
     """
 
     # ==========================================================
     # 角色说明书 (System Prompt) — 告诉 AI 它是谁、该怎么做
-    # 这是 AI 接入的核心配置文件，以后直接拿给 AI 看就行
     # ==========================================================
     SYSTEM_PROMPT = f"""你是一个查询参数提取助手。你的任务是把用户的自然语言问题，转换成结构化的查询参数 JSON。
 
@@ -403,53 +460,254 @@ class AIQueryProcessor:
     "limit": 20                         // 最多返回几条，默认20
 }}
 
-## 时间词汇怎么换算成日期（以当天为参考）
-- "今天"      → 当天日期
-- "昨天"      → 昨天的日期
-- "前天"      → 前天的日期
-- "上周"      → date_from = 7天前, date_to = 今天
+## 时间词汇怎么换算成日期（以当前日期 2026-07-30 为参考）
+- "今天"      → "2026-07-30"
+- "昨天"      → "2026-07-29"
+- "前天"      → "2026-07-28"
+- "上周"      → date_from = "2026-07-23", date_to = "2026-07-30"
 - "本周"      → date_from = 本周一, date_to = 今天
-- "本月"      → date_from = 本月1日, date_to = 今天
+- "本月"      → date_from = "2026-07-01", date_to = "2026-07-30"
 - "最近N天"   → date_from = N天前, date_to = 今天
-- "3天前"     → 具体往前推3天
-- "7月20日"   → 当年7月20日
+- "7月20日"   → "2026-07-20"
 
 ## 重要规则（请严格遵守）
 1. 你的回复里只能有 JSON 对象，不要加任何解释、问候、标点
 2. 用户没提到的字段就设成 null 或空数组，不要瞎猜
 3. 关键词要提取问题的核心主题，去掉"帮我""找一下""有没有"这类废话"""
 
+    def __init__(self, api_key: str | None = None):
+        """
+        创建 AI 查询处理器实例。
+
+        参数:
+            api_key: DeepSeek API Key。不传就用全局 DEEPSEEK_API_KEY。
+        """
+        self.api_key = api_key if api_key is not None else DEEPSEEK_API_KEY
+
     def process_query(self, question: str) -> dict:
         """
-        把用户的大白话问题转成结构化查询参数。
+        把用户的自然语言问题转成结构化查询参数。
 
-        目前占位说明：
-          这里现在直接返回空字典，表示"没提取到条件"。
-          上游 ask() 函数会接手，用简单的关键词提取兜底。
-          等接入 AI 后，这里的空字典会被 AI 返回的结构化参数替换，
-          整个智能搜索就自动跑通了。
+        内部流程：
+          1. 把 SYSTEM_PROMPT（角色说明书）和用户问题一起发给 DeepSeek
+          2. DeepSeek 返回一个 JSON，包含 keywords、content_type 等查询条件
+          3. 解析 JSON 并返回给上游的 ask() 函数
+
+        API Key 没填或调用失败时返回空字典，
+        上游会自动降级为土法关键词搜索。
 
         示例输入 → 输出：
           输入："上周复制的 Python 相关网址"
           输出：{{
               "keywords": ["Python"],
               "content_type": "url",
-              "date_from": "2026-07-22",
-              "date_to": "2026-07-29",
+              "date_from": "2026-07-23",
+              "date_to": "2026-07-30",
               "limit": 20
           }}
         """
-        # =======================================================
-        # 【接入 AI 时把下面这段替换成实际调用即可】
-        #
-        #   response = ai_client.chat(
-        #       system_prompt=self.SYSTEM_PROMPT,
-        #       user_message=question,
-        #       response_format="json"
-        #   )
-        #   return json.loads(response.content)
-        # =======================================================
-        return {}
+        # 调用 DeepSeek，让 AI 解析用户的自然语言问题
+        response = _call_deepseek(self.SYSTEM_PROMPT, question, self.api_key)
+
+        # AI 调用失败 → 返回空字典，让上游启用土法降级
+        if response is None:
+            return {}
+
+        # 解析 AI 返回的 JSON
+        try:
+            cleaned = response.strip()
+            # 去掉可能的 markdown 代码块标记 ```json ... ```
+            if cleaned.startswith("```"):
+                cleaned = cleaned.split("\n", 1)[1] if "\n" in cleaned else cleaned[3:]
+                if cleaned.endswith("```"):
+                    cleaned = cleaned.rsplit("\n", 1)[0] if "\n" in cleaned else cleaned[:-3]
+            filters = json.loads(cleaned)
+            # 去掉 AI 可能塞进来的无关字段
+            allowed_keys = {"keywords", "content_type", "origin", "date_from", "date_to", "is_processed", "limit"}
+            return {k: v for k, v in filters.items() if k in allowed_keys}
+        except json.JSONDecodeError:
+            # AI 返回了不合规的内容，降级
+            print(f"  [警告] AI 返回无法解析，原文: {response[:100]}")
+            return {}
+
+
+
+# ============================================================
+# 第四点五部分：AISummarizer — AI 智能摘要
+#
+# 职责：
+#   拿到查询结果后，对不同类型的数据做智能处理：
+#   - 如果内容是网址（url）：AI 会先去抓取网页内容，然后给你总结
+#   - 如果内容是文本（text）：AI 直接帮你总结要点
+#
+# 使用示例：
+#   summarizer = AISummarizer()
+#   summary = summarizer.summarize(record)
+#   print(summary["ai_summary"])   // "这个网页讲述了 Python sqlite3 模块的..."
+# ============================================================
+
+class AISummarizer:
+    """
+    AI 摘要器 — 对搜索结果进行智能总结。
+
+    它有两种工作模式：
+      1. 网址模式：访问网页 → 提取正文 → AI 总结
+      2. 文本模式：直接把文本发给 AI → AI 总结
+    """
+
+    # ── 网址摘要用的 System Prompt ─────────────────────────
+    SUMMARIZE_URL_PROMPT = """你是一个网页内容摘要助手。用户会给你一个网页的文本内容，请你：
+
+1. 先用一句话概括这个网页讲的是什么
+2. 列出网页中最核心的 3-5 个要点
+3. 如果内容包含代码/技术细节，简要说明涉及的技术栈
+
+注意：
+- 用中文回复
+- 控制在 300 字以内
+- 如果网页内容不完整或无法判断，据实说明"""
+
+    # ── 文本摘要用的 System Prompt ─────────────────────────
+    SUMMARIZE_TEXT_PROMPT = """你是一个文本摘要助手。用户会给你一段文本，请你：
+
+1. 用一句话概括这段文本的主题
+2. 提取文本中的关键信息，列成要点
+
+注意：
+- 用中文回复
+- 控制在 200 字以内
+- 如果文本很短，直接概括即可"""
+
+    def __init__(self, api_key: str | None = None):
+        """
+        创建摘要器实例。
+
+        参数:
+            api_key: DeepSeek API Key。不传就用全局 DEEPSEEK_API_KEY。
+        """
+        self.api_key = api_key if api_key is not None else DEEPSEEK_API_KEY
+
+    def summarize(self, record: dict) -> dict:
+        """
+        对一条数据库记录进行 AI 摘要。
+
+        参数:
+            record: 数据库查询返回的一条记录（字典）
+
+        返回:
+            在原字典基础上新增了 ai_summary 字段的新字典。
+            如果 AI 未接入，ai_summary 会是一个提示文本。
+
+        处理逻辑：
+            content_type == "url"  → 先抓取网页，再总结
+            content_type == "text" → 直接总结文本
+        """
+        result = dict(record)  # 不修改原始记录，复制一份
+
+        if record["content_type"] == CONTENT_TYPE_URL:
+            result["ai_summary"] = self._summarize_url(record["content"])
+        else:
+            result["ai_summary"] = self._summarize_text(record["content"])
+
+        return result
+
+    def summarize_batch(self, records: list[dict]) -> list[dict]:
+        """
+        对多条记录逐一摘要，返回带了 ai_summary 的列表。
+
+        每条记录都会打印进度，方便了解处理状态。
+        """
+        results = []
+        for i, record in enumerate(records, 1):
+            print(f"  [AI 摘要] 处理第 {i}/{len(records)} 条: {record.get('title', record['content'][:40])}")
+            results.append(self.summarize(record))
+        return results
+
+    def _summarize_url(self, url: str) -> str:
+        """
+        处理网址类型：
+        1. 访问网址，抓取网页内容
+        2. 把提取到的文本发给 DeepSeek 做总结
+
+        如果网页无法访问（超时、404 等），直接返回错误说明。
+        """
+        print(f"    正在访问网页: {url[:80]}...")
+
+        page_text = self._fetch_page(url)
+        if page_text is None:
+            return f"[无法访问该网页，以下为原始链接]\n{url}"
+
+        print(f"    已获取网页内容 ({len(page_text)} 字符)，正在请 AI 总结...")
+
+        user_message = f"请总结以下网页的内容：\n\nURL: {url}\n\n网页内容:\n{page_text}"
+        summary = _call_deepseek(self.SUMMARIZE_URL_PROMPT, user_message, self.api_key)
+
+        if summary is None:
+            return f"[AI 未接入，网页内容已抓取但无法生成摘要]\nURL: {url}\n网页原文前 200 字:\n{page_text[:200]}"
+
+        return summary.strip()
+
+    def _summarize_text(self, text: str) -> str:
+        """
+        处理纯文本类型：直接把文本发给 DeepSeek 做总结。
+        """
+        print(f"    正在请 AI 总结文本 ({len(text)} 字符)...")
+
+        user_message = f"请总结以下文本的内容：\n\n{text}"
+        summary = _call_deepseek(self.SUMMARIZE_TEXT_PROMPT, user_message, self.api_key)
+
+        if summary is None:
+            return f"[AI 未接入，无法生成摘要]\n原文:\n{text[:200]}"
+
+        return summary.strip()
+
+    def _fetch_page(self, url: str) -> str | None:
+        """
+        抓取网页的文本内容。
+
+        步骤：
+        1. 用 requests 下载网页 HTML
+        2. 去掉 script 和 style 标签（这些不是正文）
+        3. 去掉所有 HTML 标签，只留文本
+        4. 合并多余空白，截取前 8000 字发给 AI
+
+        返回:
+            提取后的纯文本，失败返回 None
+        """
+        try:
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                              "AppleWebKit/537.36 (KHTML, like Gecko) "
+                              "Chrome/120.0.0.0 Safari/537.36"
+            }
+            resp = requests.get(url, timeout=15, headers=headers)
+            resp.raise_for_status()
+
+            html = resp.text
+
+            # 去掉不会出现在正文里的标签
+            html = re.sub(r'<script[^>]*>.*?</script>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            html = re.sub(r'<style[^>]*>.*?</style>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            html = re.sub(r'<nav[^>]*>.*?</nav>', '', html, flags=re.DOTALL | re.IGNORECASE)
+            html = re.sub(r'<footer[^>]*>.*?</footer>', '', html, flags=re.DOTALL | re.IGNORECASE)
+
+            # 去掉所有 HTML 标签，只保留文字
+            text = re.sub(r'<[^>]+>', ' ', html)
+            # 把 HTML 实体换成普通字符
+            text = text.replace('&nbsp;', ' ').replace('&lt;', '<').replace('&gt;', '>')
+            text = text.replace('&amp;', '&').replace('&quot;', '"')
+            # 合并连续空白
+            text = re.sub(r'\s+', ' ', text).strip()
+
+            if not text or len(text) < 50:
+                return None  # 内容太少，可能是需要 JS 渲染的页面
+
+            # 截取前 8000 字符，控制 AI 输入长度
+            return text[:8000]
+
+        except requests.exceptions.RequestException as e:
+            print(f"    [网页访问失败] {e}")
+            return None
 
 
 # ============================================================
@@ -504,7 +762,6 @@ def _fallback_extract(question: str) -> dict:
     }
 
     # 按标点符号把句子拆成词语
-    import re
     tokens = re.split(r"[，,。\.\s、；;：:！!？?\"]+", question)
     useful_words = [
         t.strip() for t in tokens
@@ -516,7 +773,7 @@ def _fallback_extract(question: str) -> dict:
 
 
 # ============================================================
-# 测试代码 — 直接运行 python search.py 就能跑
+# 测试代码 — 直接运行 python "create table.py" 就能跑
 # 三个环节：写入数据 → 结构化查询 → 自然语言查询
 # ============================================================
 

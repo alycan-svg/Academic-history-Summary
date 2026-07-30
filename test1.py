@@ -1,8 +1,12 @@
-{
-        "type": c_type,             # "url" 或 "text"
-        "content": content,         # URL 链接或纯文本内容
-        "title": title,             # 网页标题或文本简述
-        "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-        "origin": origin,           # 来源标记："clipboard" 或 "browser_history"
-        "processed": False          # 留给 B 同学的初始状态
-    }
+class Student:
+    def __init__(self, name, age):
+        self.name = name
+        self.age = age
+
+    def introduce(self):
+        print(f"我是{self.name}, 今年{self.age}岁")
+
+s1 = Student("小美", 18)
+s2 = Student("小帅", 20)
+s1.introduce()
+s2.introduce()
