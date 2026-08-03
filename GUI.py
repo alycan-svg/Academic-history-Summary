@@ -24,6 +24,9 @@ from search import (
     FIELD_CONTENT_TYPE,
     FIELD_CONTENT,
     FIELD_ORIGIN,
+    FIELD_HIT_COUNT,
+    TABLE_NAME,
+    FIELD_ID,
 )
 
 
@@ -90,16 +93,18 @@ class SummaryBrowserGUI:
         tree_frame = ttk.Frame(self.root)
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
-        columns = ("title", "tags", "created_at", "deep")
+        columns = ("title", "tags", "count", "created_at", "deep")
         self._tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
 
         self._tree.heading("title", text="标题", command=lambda: self._sort_by("title"))
         self._tree.heading("tags", text="标签")
+        self._tree.heading("count", text="次数")
         self._tree.heading("created_at", text="日期", command=lambda: self._sort_by("created_at"))
         self._tree.heading("deep", text="深度摘要")
 
-        self._tree.column("title", width=380, minwidth=150)
-        self._tree.column("tags", width=200, minwidth=80)
+        self._tree.column("title", width=340, minwidth=150)
+        self._tree.column("tags", width=180, minwidth=80)
+        self._tree.column("count", width=50, minwidth=40, anchor=tk.CENTER)
         self._tree.column("created_at", width=140, minwidth=80)
         self._tree.column("deep", width=80, minwidth=60, anchor=tk.CENTER)
 
@@ -142,6 +147,8 @@ class SummaryBrowserGUI:
         if self._deep_var.get():
             kwargs["is_deep_summarized"] = 0
 
+        is_searching = bool(self._current_search or self._current_tag)
+
         order_by = self._current_sort_col
         if self._current_sort_desc:
             order_by += " DESC"
@@ -155,6 +162,22 @@ class SummaryBrowserGUI:
             is_deep_summarized=kwargs.get("is_deep_summarized"),
         )
 
+        # ── 批量获取命中次数（一次查询，避免 N+1） ──
+        hit_map = {}
+        if records:
+            source_ids = [r[UFIELD_SOURCE_ID] for r in records]
+            placeholders = ",".join(["?"] * len(source_ids))
+            hit_rows = self.source_db.conn.execute(
+                f"SELECT {FIELD_ID}, {FIELD_HIT_COUNT} FROM {TABLE_NAME} "
+                f"WHERE {FIELD_ID} IN ({placeholders})",
+                source_ids,
+            ).fetchall()
+            hit_map = {row[FIELD_ID]: row[FIELD_HIT_COUNT] for row in hit_rows}
+
+        # ── 搜索时按命中次数从高到低排序；浏览时保持时间排序 ──
+        if is_searching:
+            records.sort(key=lambda r: hit_map.get(r[UFIELD_SOURCE_ID], 1), reverse=True)
+
         for r in records:
             deep_status = "✅" if r[UFIELD_IS_DEEP_SUMMARIZED] else "—"
             # 截断标题
@@ -162,9 +185,10 @@ class SummaryBrowserGUI:
             if len(title) > 60:
                 title = title[:57] + "..."
             tags = r[UFIELD_TAGS] or ""
+            hits = str(hit_map.get(r[UFIELD_SOURCE_ID], 1))
             date = (r[UFIELD_CREATED_AT] or "")[:10]
             self._tree.insert("", tk.END, iid=r[UFIELD_ID],
-                              values=(title, tags, date, deep_status))
+                              values=(title, tags, hits, date, deep_status))
 
         self._status_label.config(text=f"共 {total} 条记录 | 当前显示 {len(records)} 条 | 双击查看详情")
 
@@ -271,10 +295,15 @@ class SummaryBrowserGUI:
 
         if source:
             src_type = f"{source[FIELD_CONTENT_TYPE]} | 来源: {source[FIELD_ORIGIN]}"
+            hit_count = source.get(FIELD_HIT_COUNT, 1)
             ttk.Label(info_frame, text="原始类型：", font=("", 9, "bold")).grid(
                 row=len(fields), column=0, sticky=tk.W, padx=(0, 10), pady=2)
             ttk.Label(info_frame, text=src_type).grid(
                 row=len(fields), column=1, sticky=tk.W, pady=2)
+            ttk.Label(info_frame, text="命中次数：", font=("", 9, "bold")).grid(
+                row=len(fields)+1, column=0, sticky=tk.W, padx=(0, 10), pady=2)
+            ttk.Label(info_frame, text=f"已存入 {hit_count} 次").grid(
+                row=len(fields)+1, column=1, sticky=tk.W, pady=2)
 
         # ── 原始内容区 ──────────────────────────────────────
         content_frame = ttk.LabelFrame(win, text="原始内容", padding="10")

@@ -50,6 +50,7 @@ FIELD_ORIGIN       = "origin"          # 来源：剪贴板复制 还是 浏览�
 FIELD_IS_PROCESSED = "is_processed"    # 是否已处理：0=未处理, 1=已处理
 FIELD_CREATED_AT   = "created_at"      # 记录创建时间（由数据库自动填充）
 FIELD_UPDATED_AT   = "updated_at"      # 记录最后更新时间
+FIELD_HIT_COUNT    = "hit_count"       # 命中次数：同一内容被重复存入的次数
 
 # 所有字段的列表，遍历建表/查询时用
 ALL_FIELDS = [
@@ -62,6 +63,7 @@ ALL_FIELDS = [
     FIELD_IS_PROCESSED,
     FIELD_CREATED_AT,
     FIELD_UPDATED_AT,
+    FIELD_HIT_COUNT,
 ]
 
 # 内容类型只有两种：网址链接 或 纯文本
@@ -94,15 +96,16 @@ CREATE TABLE IF NOT EXISTS {TABLE_NAME} (
     {FIELD_ORIGIN}        TEXT    NOT NULL DEFAULT '{DEFAULT_ORIGIN}',
     {FIELD_IS_PROCESSED}  INTEGER NOT NULL DEFAULT {DEFAULT_IS_PROCESSED},
     {FIELD_CREATED_AT}    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
-    {FIELD_UPDATED_AT}    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime'))
+    {FIELD_UPDATED_AT}    TEXT    NOT NULL DEFAULT (datetime('now', 'localtime')),
+    {FIELD_HIT_COUNT}     INTEGER NOT NULL DEFAULT 1
 )
 """
 
 # 插入 SQL — 用 ? 占位符防止 SQL 注入
 INSERT_SQL = f"""
 INSERT INTO {TABLE_NAME}
-    ({FIELD_CONTENT_TYPE}, {FIELD_CONTENT}, {FIELD_TITLE}, {FIELD_CAPTURED_AT}, {FIELD_ORIGIN})
-VALUES (?, ?, ?, ?, ?)
+    ({FIELD_CONTENT_TYPE}, {FIELD_CONTENT}, {FIELD_TITLE}, {FIELD_CAPTURED_AT}, {FIELD_ORIGIN}, {FIELD_HIT_COUNT})
+VALUES (?, ?, ?, ?, ?, 1)
 """
 
 # 索引列表 — 给常用查询字段建索引，数据多了也能快速搜索
@@ -218,18 +221,34 @@ class ClipboardDB:
         self.light_summarizer = light_summarizer
 
     def _ensure_table(self):
-        """建表 + 建索引（IF NOT EXISTS 保证重复调用也安全）"""
+        """建表 + 建索引 + 迁移（IF NOT EXISTS 保证重复调用也安全）"""
         self.conn.execute(CREATE_TABLE_SQL)
         for sql in INDEX_SQLS:
             self.conn.execute(sql)
+        self._migrate()
         self.conn.commit()
+
+    def _migrate(self):
+        """兼容旧数据库：检查并添加缺失的列"""
+        cols = self.conn.execute(f"PRAGMA table_info({TABLE_NAME})").fetchall()
+        col_names = {c[1] for c in cols}
+        if FIELD_HIT_COUNT not in col_names:
+            self.conn.execute(
+                f"ALTER TABLE {TABLE_NAME} ADD COLUMN {FIELD_HIT_COUNT} INTEGER NOT NULL DEFAULT 1"
+            )
+            print("  [迁移] 已添加 hit_count 列（已有记录默认为 1）")
 
     def receive(self, data: dict) -> (int, int | None):
         """
-        存一条数据到数据库。如果已有相同内容（type + content + title + origin）
-        的记录，只更新时间戳，不重复插入，不重新生成摘要。
+        存一条数据到数据库。
 
-        接收一个字典，必须包含 type 和 content 字段，title、timestamp、origin 可选。
+        去重规则：如果已有相同（type + content + title + origin）的记录：
+          - hit_count += 1，更新 captured_at 时间戳
+          - 已有的 AI 摘要保持不变（内容没变，无需重新生成）
+          - 返回已有的 source_id 和 summary_id（如有）
+
+        如果是全新内容：插入新记录（hit_count = 1），并自动生成 AI 摘要。
+
         返回 (source_id, summary_id) — summary_id 在未配置自动摘要时为 None。
 
         示例输入：
@@ -257,7 +276,7 @@ class ClipboardDB:
         if origin not in VALID_ORIGINS:
             raise ValueError(f"来源错误！只能是 {VALID_ORIGINS}，收到了: {origin!r}")
 
-        # ── 去重：查是否已有同内容记录（忽略时间） ──
+        # ── 去重：查是否已有同内容记录（四字段全匹配） ──
         existing = self.conn.execute(
             f"""SELECT {FIELD_ID} FROM {TABLE_NAME}
                 WHERE {FIELD_CONTENT_TYPE} = ?
@@ -269,20 +288,36 @@ class ClipboardDB:
         ).fetchone()
 
         if existing:
-            # 已有旧记录 → 删掉旧的（含关联摘要），下面走正常插入+AI摘要
+            # ── 命中：hit_count +1，更新 captured_at，保留摘要 ──
             old_id = existing[FIELD_ID]
-            if self.user_db:
-                old_summary = self.user_db.get_by_source_id(old_id)
-                if old_summary:
-                    self.user_db.delete(old_summary[UFIELD_ID])
             self.conn.execute(
-                f"DELETE FROM {TABLE_NAME} WHERE {FIELD_ID} = ?",
-                (old_id,),
+                f"""UPDATE {TABLE_NAME}
+                    SET {FIELD_HIT_COUNT} = {FIELD_HIT_COUNT} + 1,
+                        {FIELD_CAPTURED_AT} = ?,
+                        {FIELD_UPDATED_AT} = datetime('now', 'localtime')
+                    WHERE {FIELD_ID} = ?""",
+                (captured_at, old_id),
             )
             self.conn.commit()
-            print(f"  [去重] 删除旧记录 source_id={old_id}，即将写入新记录")
 
-        # 执行插入，返回新记录的 id
+            # 读取更新后的 hit_count 用于日志
+            row = self.conn.execute(
+                f"SELECT {FIELD_HIT_COUNT} FROM {TABLE_NAME} WHERE {FIELD_ID} = ?",
+                (old_id,),
+            ).fetchone()
+            new_count = row[FIELD_HIT_COUNT] if row else "?"
+            print(f"  [命中] source_id={old_id}，hit_count → {new_count}")
+
+            # 已有的摘要保持不变（内容没变，不重新生成）
+            summary_id = None
+            if self.user_db:
+                existing_summary = self.user_db.get_by_source_id(old_id)
+                if existing_summary:
+                    summary_id = existing_summary[UFIELD_ID]
+
+            return old_id, summary_id
+
+        # ── 新记录：正常插入 ──
         cur = self.conn.execute(
             INSERT_SQL,
             (content_type, content, title, captured_at, origin),
