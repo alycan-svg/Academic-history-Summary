@@ -10,6 +10,23 @@
 # 依赖：tkinter（Python 自带，无需安装）
 # ============================================================
 
+from search import (
+    QueryEngine,
+    AISummarizer,
+    UFIELD_ID,
+    UFIELD_SOURCE_ID,
+    UFIELD_TITLE,
+    UFIELD_SUMMARY,
+    UFIELD_TAGS,
+    UFIELD_DEEP_SUMMARY,
+    UFIELD_IS_DEEP_SUMMARIZED,
+    UFIELD_CREATED_AT,
+    FIELD_CONTENT_TYPE,
+    FIELD_CONTENT,
+    FIELD_ORIGIN,
+)
+
+
 class SummaryBrowserGUI:
     """用户摘要浏览器 GUI — 基于 tkinter"""
 
@@ -332,27 +349,35 @@ class SummaryBrowserGUI:
         button.pack_forget()  # 隐藏按钮（已完成）
 
 
-def _fallback_extract(question: str) -> dict:
-    """
-    土法关键词提取 — AI 没接时的降级方案。
+# ============================================================
+# 独立启动入口 — 同事拿到 GUI.py 后直接 python GUI.py 即可
+# 前提：同目录下有 search.py（数据库 + AI 后端）
+# ============================================================
 
-    把用户问题中的语气词、疑问词去掉，剩下的字词直接拿去搜。
-    准确度不高，但总比什么都搜不到强。
-    等 AI 接入后，这个方法可以继续留着当备胎。
-    """
-    # 这些词在搜索里没什么意义，去掉它们
-    meaningless_words = {
-        "帮我", "查找", "搜索", "有没有", "找一下", "我想", "请问",
-        "是什么", "怎么", "哪些", "什么", "哪个", "最近", "关于",
-        "的", "了", "吗", "呢", "吧", "一下",
-    }
+if __name__ == "__main__":
+    from search import ClipboardDB, UserSummaryDB, LightweightSummarizer, AISummarizer as DeepSummarizer
 
-    # 按标点符号把句子拆成词语
-    tokens = re.split(r"[，,。\.\s、；;：:！!？?\"]+", question)
-    useful_words = [
-        t.strip() for t in tokens
-        if t.strip() and t.strip() not in meaningless_words
-    ]
+    print("=" * 60)
+    print("用户摘要浏览器 — Summary Browser GUI")
+    print("=" * 60)
 
-    keywords = useful_words if useful_words else [question]
-    return {"keywords": keywords, "limit": 20}
+    # 初始化数据库和 AI 组件
+    print("\n[1] 初始化数据库和 AI 模块...")
+    db = ClipboardDB()
+    user_db = UserSummaryDB()
+    light_sum = LightweightSummarizer()
+    deep_sum = DeepSummarizer()
+
+    # 注入自动摘要（ClipboardDB 存入数据时自动调用 LightweightSummarizer）
+    db.user_db = user_db
+    db.light_summarizer = light_sum
+
+    # 启动 GUI
+    print("\n[2] 启动图形界面...")
+    app = SummaryBrowserGUI(user_db, db, deep_sum)
+    app.launch()
+
+    # 清理
+    user_db.close()
+    db.close()
+    print("\n程序结束。")
