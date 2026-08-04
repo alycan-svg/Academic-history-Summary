@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>摘要档案馆 · Summary Archive</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600;9..144,700&family=Inter:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.4/chart.umd.min.js"></script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark">§</span>
+    <div class="brand-text">
+      <h1>摘要档案馆</h1>
+      <p class="brand-sub">CLIPBOARD SUMMARY ARCHIVE</p>
+    </div>
+  </div>
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="catalog">目录</button>
+    <button class="tab-btn" data-tab="stats">阅览统计</button>
+  </nav>
+</header>
+
+<main>
+  <!-- ── 目录视图 ─────────────────────────────────────── -->
+  <section id="view-catalog" class="view active">
+    <div class="toolbar">
+      <div class="search-box">
+        <span class="search-icon">⌕</span>
+        <input id="search-input" type="text" placeholder="搜索标题、摘要或内容…">
+      </div>
+      <select id="tag-select">
+        <option value="">全部标签</option>
+      </select>
+      <label class="chip-toggle">
+        <input type="checkbox" id="pending-toggle">
+        <span>仅未深度总结</span>
+      </label>
+      <div class="sort-group">
+        <select id="sort-select">
+          <option value="created_at">按日期</option>
+          <option value="title">按标题</option>
+        </select>
+        <button id="order-btn" data-order="desc" title="切换升序/降序">↓</button>
+      </div>
+      <button id="reset-btn" class="ghost-btn">重置</button>
+    </div>
+
+    <p id="status-line" class="status-line">加载中…</p>
+
+    <div id="card-grid" class="card-grid"></div>
+    <div id="empty-state" class="empty-state" hidden>
+      <p>没有找到匹配的记录</p>
+      <span>试试换一个关键词，或清除筛选条件</span>
+    </div>
+
+    <div class="pagination">
+      <button id="prev-page" class="ghost-btn">‹ 上一页</button>
+      <span id="page-indicator">–</span>
+      <button id="next-page" class="ghost-btn">下一页 ›</button>
+    </div>
+  </section>
+
+  <!-- ── 统计视图 ─────────────────────────────────────── -->
+  <section id="view-stats" class="view">
+    <div class="stats-grid">
+      <div class="stat-card">
+        <span class="stat-num" id="stat-total">–</span>
+        <span class="stat-label">总记录数</span>
+      </div>
+      <div class="stat-card accent-moss">
+        <span class="stat-num" id="stat-done">–</span>
+        <span class="stat-label">已深度总结</span>
+      </div>
+      <div class="stat-card accent-rust">
+        <span class="stat-num" id="stat-pending">–</span>
+        <span class="stat-label">待深度总结</span>
+      </div>
+    </div>
+
+    <div class="chart-row">
+      <div class="chart-card">
+        <h3>深度总结完成度</h3>
+        <canvas id="chart-donut"></canvas>
+      </div>
+      <div class="chart-card wide">
+        <h3>近期收录趋势</h3>
+        <canvas id="chart-timeline"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card">
+      <h3>高频标签 Top 10</h3>
+      <canvas id="chart-tags"></canvas>
+    </div>
+  </section>
+</main>
+
+<!-- ── 详情抽屉 ─────────────────────────────────────── -->
+<div id="detail-overlay" class="overlay">
+  <div id="detail-drawer" class="drawer">
+    <button id="drawer-close" class="drawer-close" aria-label="关闭">✕</button>
+    <div id="drawer-content" class="drawer-content"></div>
+  </div>
+</div>
+
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
